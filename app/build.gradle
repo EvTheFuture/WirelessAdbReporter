@@ -1,0 +1,72 @@
+plugins {
+    id "com.android.application"
+}
+
+// The version string in the VERSION file at the repository root, for example 1.2
+def appVersion() {
+
+    def file = rootProject.file("VERSION")
+
+    if (!file.exists()) {
+        return "0.0"
+    }
+
+    return file.getText("UTF-8").trim()
+}
+
+// The same version as one increasing number, two digits per part, so
+// 1.2 becomes 1020000. Anything but digits and dots is ignored
+def appVersionCode() {
+
+    def parts = appVersion().replaceAll(/[^0-9.]/, "").tokenize(".")
+    def code = 0
+
+    for (int i = 0; i < 4; i++) {
+        code = code * 100 + (i < parts.size() ? (parts[i] as int) : 0)
+    }
+
+    return code
+}
+
+android {
+    namespace "io.github.evthefuture.adbreporter"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "io.github.evthefuture.adbreporter"
+        minSdk 30
+        targetSdk 36
+
+        // Taken from VERSION, build.sh reads the same file
+        versionName appVersion()
+        versionCode appVersionCode()
+    }
+
+    // Debug and release share the project key, so every build installs over the
+    // previous one and the permissions granted with pm grant are kept
+    signingConfigs {
+        reporter {
+            storeFile rootProject.file("keystore/adbreporter.p12")
+            storeType "pkcs12"
+            storePassword "adbreporter"
+            keyAlias "adbreporter"
+            keyPassword "adbreporter"
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.reporter
+        }
+
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.reporter
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

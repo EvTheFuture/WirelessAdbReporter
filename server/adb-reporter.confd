@@ -1,0 +1,11 @@
+# User that owns your adb keys (~/.android/adbkey) and adb server
+ADB_REPORTER_USER="magnus"
+
+# Where the server script is installed
+ADB_REPORTER_BIN="/usr/local/bin/adb-reporter-server.py"
+
+# Token must match the one entered in the app
+ADB_REPORTER_TOKEN="change-me"
+export ADB_REPORTER_TOKEN
+
+ADB_REPORTER_ARGS="--auto-connect --reconnect-on-heartbeat --port 8765"

@@ -1,0 +1,9 @@
+.gradle/
+build/
+app/build/
+out/
+dist/
+local.properties
+__pycache__/
+*.apk
+*.zip

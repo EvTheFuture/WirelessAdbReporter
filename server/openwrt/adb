@@ -1,0 +1,325 @@
+#!/bin/sh
+#
+# Wireless ADB Reporter receiver for OpenWrt, a CGI script for uhttpd.
+#
+# The same API as server/adb-reporter-server.py, without Python. Installed as
+# /www-adb-reporter/api/adb with cgi_prefix /api, so the URLs are identical:
+#
+#   POST /api/adb                      JSON report from the phone
+#   GET  /api/adb                      all devices as JSON
+#   GET  /api/adb/<device_id>          one device as JSON
+#   GET  /api/adb/<device_id>/connect  plain "ip:port", for scripts
+#
+# Lookups match device_id first, then the adb serial, then the name, all
+# case insensitive. Needs only what every OpenWrt image ships: busybox ash,
+# jsonfilter and jshn (jshn.sh needs ash, it does not run under dash or bash).
+# Settings live in /etc/config/adb_reporter.
+
+. /usr/share/libubox/jshn.sh
+
+MAX_BODY=65536
+
+# ----------------------------------------------------------------------
+# Settings
+# ----------------------------------------------------------------------
+
+# One option from /etc/config/adb_reporter, or the default when unset
+option() {
+    local value
+
+    value=$(uci -q get "adb_reporter.main.$1" 2>/dev/null)
+    printf '%s' "${value:-$2}"
+}
+
+TOKEN=$(option token "")
+STATE_DIR=$(option state_dir /tmp/adb-reporter)
+STALE_AFTER=$(option stale_after 900)
+OPEN_GET=$(option open_get 0)
+HOOK=$(option hook "")
+HOOK_ALWAYS=$(option hook_always 0)
+
+case "$STALE_AFTER" in
+    ''|*[!0-9]*) STALE_AFTER=900 ;;
+esac
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+log() {
+    logger -t adb-reporter "$*" 2>/dev/null
+}
+
+# CGI headers, uhttpd turns the Status header into the response line
+headers() {
+    printf 'Status: %s\r\nContent-Type: %s; charset=utf-8\r\nCache-Control: no-store\r\n\r\n' "$1" "$2"
+}
+
+# Only fixed strings are passed as messages, never request data
+fail() {
+    headers "$1" application/json
+    printf '{ "error": "%s" }\n' "$2"
+    exit 0
+}
+
+lower() {
+    printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+# A device id is also a file name, so only a safe set of characters is allowed
+valid_id() {
+
+    case "$1" in
+        ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+
+    [ ${#1} -le 64 ]
+}
+
+authorized() {
+
+    if [ -z "$TOKEN" ]; then
+        return 0
+    fi
+
+    [ "$HTTP_AUTHORIZATION" = "Bearer $TOKEN" ]
+}
+
+# Decodes %XX and + in a URL path segment
+urldecode() {
+    local escaped
+
+    escaped=$(printf '%s' "$1" | sed 's/+/ /g; s/\\/\\\\/g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')
+    printf '%b' "$escaped"
+}
+
+# The stored file for an id, a serial or a name, printed on stdout
+find_device() {
+    local key field file value
+
+    key=$(lower "$1")
+
+    if valid_id "$key" && [ -f "$STATE_DIR/$key.json" ]; then
+        echo "$STATE_DIR/$key.json"
+        return 0
+    fi
+
+    for field in serial name; do
+
+        for file in "$STATE_DIR"/*.json; do
+
+            if [ ! -f "$file" ]; then
+                continue
+            fi
+
+            value=$(jsonfilter -i "$file" -e "@.$field" 2>/dev/null)
+
+            if [ -n "$value" ] && [ "$(lower "$value")" = "$key" ]; then
+                echo "$file"
+                return 0
+            fi
+        done
+    done
+
+    return 1
+}
+
+# A stored record plus age_seconds and stale, as JSON. $2 is passed to json_dump
+describe() {
+    local reported_at age now
+
+    now=$(date +%s)
+    json_load "$(cat "$1")" 2>/dev/null || return 1
+    json_get_var reported_at reported_at
+    age=$((now - ${reported_at:-0}))
+
+    if [ "$age" -lt 0 ]; then
+        age=0
+    fi
+
+    json_add_int age_seconds "$age"
+    json_add_boolean stale "$([ "$age" -gt "$STALE_AFTER" ] && echo 1 || echo 0)"
+    json_dump $2
+}
+
+# ----------------------------------------------------------------------
+# Requests
+# ----------------------------------------------------------------------
+
+handle_post() {
+    local length body r_device_id r_name r_model r_serial r_ip r_port r_ssid r_android r_reason
+    local id key file tmp previous endpoint changed now
+
+    if [ -n "${PATH_INFO#/}" ]; then
+        fail "404 Not Found" "not found"
+    fi
+
+    if ! authorized; then
+        log "rejected report from $REMOTE_ADDR: bad token"
+        fail "401 Unauthorized" "unauthorized"
+    fi
+
+    length=${CONTENT_LENGTH:-0}
+
+    case "$length" in
+        ''|*[!0-9]*) fail "400 Bad Request" "bad content length" ;;
+    esac
+
+    if [ "$length" -gt "$MAX_BODY" ]; then
+        fail "413 Payload Too Large" "report too large"
+    fi
+
+    body=$(head -c "$length")
+
+    if [ "$(jsonfilter -s "$body" -t '@' 2>/dev/null)" != "object" ]; then
+        fail "400 Bad Request" "bad report: not a JSON object"
+    fi
+
+    # jsonfilter prints shell-quoted assignments, missing fields stay empty
+    eval "$(jsonfilter -s "$body" \
+        -e 'r_device_id=@.device_id' -e 'r_name=@.name' -e 'r_model=@.model' \
+        -e 'r_serial=@.serial' -e 'r_ip=@.ip' -e 'r_port=@.port' -e 'r_ssid=@.ssid' \
+        -e 'r_android=@.android' -e 'r_reason=@.reason' 2>/dev/null)"
+
+    case "$r_ip" in
+        ''|*[!0-9A-Fa-f.:]*) fail "400 Bad Request" "bad report: ip" ;;
+    esac
+
+    case "$r_port" in
+        ''|*[!0-9]*) fail "400 Bad Request" "bad report: port" ;;
+    esac
+
+    if [ ${#r_ip} -gt 45 ] || [ ${#r_port} -gt 5 ] || [ "$r_port" -lt 1 ] || [ "$r_port" -gt 65535 ]; then
+        fail "400 Bad Request" "bad report: ip or port out of range"
+    fi
+
+    id=${r_device_id:-$r_serial}
+
+    if ! valid_id "$id"; then
+        fail "400 Bad Request" "bad report: device_id must be letters, digits, dot, dash or underscore"
+    fi
+
+    # IPv6 needs brackets in adb connect
+    case "$r_ip" in
+        *:*) endpoint="[$r_ip]:$r_port" ;;
+        *) endpoint="$r_ip:$r_port" ;;
+    esac
+
+    key=$(lower "$id")
+    file="$STATE_DIR/$key.json"
+    previous=$(jsonfilter -i "$file" -e '@.connect' 2>/dev/null)
+    now=$(date +%s)
+
+    json_init
+    json_add_string device_id "$id"
+    json_add_string name "${r_name:-$id}"
+    json_add_string model "$r_model"
+    json_add_string serial "$r_serial"
+    json_add_string ip "$r_ip"
+    json_add_int port "$r_port"
+    json_add_string connect "$endpoint"
+    json_add_string ssid "$r_ssid"
+    json_add_string android "$r_android"
+    json_add_string reason "$r_reason"
+    json_add_int reported_at "$now"
+    json_add_string remote_addr "$REMOTE_ADDR"
+
+    # Written next to the target and renamed, so readers never see half a file
+    umask 077
+    mkdir -p "$STATE_DIR" || fail "500 Internal Server Error" "state directory not writable"
+    tmp="$STATE_DIR/.$key.$$"
+    json_dump > "$tmp" && mv -f "$tmp" "$file" || fail "500 Internal Server Error" "could not store report"
+
+    changed=false
+
+    if [ "$previous" != "$endpoint" ]; then
+        changed=true
+        log "$id: ${previous:--} -> $endpoint ($r_reason)"
+    fi
+
+    # Detached, the phone gets its answer without waiting for the hook
+    if [ -n "$HOOK" ] && { [ "$changed" = true ] || [ "$HOOK_ALWAYS" = 1 ]; }; then
+        ADB_DEVICE_ID="$id" ADB_NAME="${r_name:-$id}" ADB_IP="$r_ip" ADB_PORT="$r_port" \
+            ADB_CONNECT="$endpoint" ADB_PREVIOUS="$previous" ADB_SERIAL="$r_serial" \
+            sh -c "$HOOK" </dev/null >/dev/null 2>&1 &
+    fi
+
+    headers "200 OK" application/json
+    printf '{ "ok": true, "changed": %s }\n' "$changed"
+}
+
+handle_get() {
+    local path device action file key separator record
+
+    if [ "$OPEN_GET" != 1 ] && ! authorized; then
+        fail "401 Unauthorized" "unauthorized"
+    fi
+
+    path=${PATH_INFO#/}
+    path=${path%/}
+
+    # All devices, one compact record per line
+    if [ -z "$path" ]; then
+        headers "200 OK" application/json
+        printf '{'
+        separator=""
+
+        for file in "$STATE_DIR"/*.json; do
+
+            if [ ! -f "$file" ]; then
+                continue
+            fi
+
+            key=${file##*/}
+            key=${key%.json}
+
+            # A damaged file is skipped instead of breaking the whole list
+            if ! record=$(describe "$file"); then
+                continue
+            fi
+
+            printf '%s\n  "%s": %s' "$separator" "$key" "$record"
+            separator=","
+        done
+
+        printf '\n}\n'
+        return
+    fi
+
+    device=$(urldecode "${path%%/*}")
+    action=""
+
+    if [ "$path" != "${path%%/*}" ]; then
+        action=${path#*/}
+    fi
+
+    if [ -n "$action" ] && [ "$action" != "connect" ]; then
+        fail "404 Not Found" "not found"
+    fi
+
+    if ! file=$(find_device "$device"); then
+
+        if [ "$action" = "connect" ]; then
+            headers "404 Not Found" text/plain
+            echo "unknown device"
+            exit 0
+        fi
+
+        fail "404 Not Found" "unknown device"
+    fi
+
+    if [ "$action" = "connect" ]; then
+        headers "200 OK" text/plain
+        jsonfilter -i "$file" -e '@.connect'
+        return
+    fi
+
+    headers "200 OK" application/json
+    describe "$file" -i
+}
+
+case "$REQUEST_METHOD" in
+    POST) handle_post ;;
+    GET) handle_get ;;
+    *) fail "405 Method Not Allowed" "method not allowed" ;;
+esac

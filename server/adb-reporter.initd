@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the Wireless ADB Reporter receiver.
+# Install: cp adb-reporter.initd /etc/init.d/adb-reporter
+#          cp adb-reporter.confd /etc/conf.d/adb-reporter
+#          rc-update add adb-reporter default
+
+name="adb-reporter"
+description="Receives wireless adb endpoints from phones and runs adb connect"
+
+: ${ADB_REPORTER_USER:=nobody}
+: ${ADB_REPORTER_BIN:=/usr/local/bin/adb-reporter-server.py}
+: ${ADB_REPORTER_ARGS:=--auto-connect}
+
+command="$ADB_REPORTER_BIN"
+command_args="$ADB_REPORTER_ARGS"
+command_user="$ADB_REPORTER_USER"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    checkpath -f -o "$ADB_REPORTER_USER" "$output_log"
+
+    # Run as the desktop user so adb talks to the same adb server and keys
+    export HOME="$(getent passwd "$ADB_REPORTER_USER" | cut -d: -f6)"
+}

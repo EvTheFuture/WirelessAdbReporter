@@ -1,0 +1,4 @@
+// Only the Android plugin, the app uses the plain framework and no libraries
+plugins {
+    id "com.android.application" version "8.11.1" apply false
+}
