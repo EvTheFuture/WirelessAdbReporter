@@ -2,13 +2,15 @@
 #
 # Wireless ADB Reporter receiver for OpenWrt, a CGI script for uhttpd.
 #
-# The same API as server/adb-reporter-server.py, without Python. Installed as
-# /www-adb-reporter/api/adb with cgi_prefix /api, so the URLs are identical:
+# The same API as server/adb-reporter-server.py, without Python. Not a daemon:
+# uhttpd starts it for each request and it exits when it has answered. Put it in
+# /www/cgi-bin/adb of the router's own uhttpd, the API is then under
+# /cgi-bin/adb instead of /api/adb:
 #
-#   POST /api/adb                      JSON report from the phone
-#   GET  /api/adb                      all devices as JSON
-#   GET  /api/adb/<device_id>          one device as JSON
-#   GET  /api/adb/<device_id>/connect  plain "ip:port", for scripts
+#   POST /cgi-bin/adb                      JSON report from the phone
+#   GET  /cgi-bin/adb                      all devices as JSON
+#   GET  /cgi-bin/adb/<device_id>          one device as JSON
+#   GET  /cgi-bin/adb/<device_id>/connect  plain "ip:port", for scripts
 #
 # Lookups match device_id first, then the adb serial, then the name, all
 # case insensitive. Needs only what every OpenWrt image ships: busybox ash,

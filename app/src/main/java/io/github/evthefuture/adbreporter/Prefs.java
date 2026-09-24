@@ -38,6 +38,9 @@ final class Prefs {
     static final String ST_REPORT = "report";
     static final String ST_EVENT = "event";
 
+    // One line summary of what the service is doing, the notification text
+    static final String ST_STATE = "state";
+
     // Global settings keys used by the system for adb
     static final String ADB_ENABLED = "adb_enabled";
     static final String ADB_WIFI_ENABLED = "adb_wifi_enabled";

@@ -85,6 +85,17 @@ final class Ui {
         return view;
     }
 
+    /**
+     * The adb connect address, large enough to read from across the desk.
+     */
+    static TextView endpoint(Context context) {
+        TextView view = new TextView(context);
+        view.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        view.setPadding(0, dp(context, 12), 0, 0);
+        return view;
+    }
+
     static TextView mono(Context context) {
         TextView view = new TextView(context);
         view.setTypeface(Typeface.MONOSPACE);

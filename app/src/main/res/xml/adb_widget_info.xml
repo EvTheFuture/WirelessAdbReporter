@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 3x1 by default, resizable. No update period, the service pushes changes -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/widget"
+    android:minHeight="56dp"
+    android:minResizeHeight="40dp"
+    android:minResizeWidth="110dp"
+    android:minWidth="180dp"
+    android:previewLayout="@layout/widget"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="1"
+    android:targetCellWidth="3"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen|keyguard" />

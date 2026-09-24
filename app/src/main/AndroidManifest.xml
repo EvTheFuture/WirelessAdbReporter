@@ -64,6 +64,20 @@
                 android:value="Enables wireless debugging on configured Wi-Fi networks and reports its IP and port to a developer server" />
         </service>
 
+        <!-- Home screen widget, not exported: the launcher's updates come from the system -->
+        <receiver
+            android:name=".AdbWidget"
+            android:exported="false"
+            android:label="Wireless ADB">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/adb_widget_info" />
+        </receiver>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">

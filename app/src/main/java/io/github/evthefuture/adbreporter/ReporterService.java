@@ -5,8 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.database.ContentObserver;
@@ -105,6 +107,7 @@ public class ReporterService extends Service {
     private ConnectivityManager.NetworkCallback defaultCallback;
     private boolean replaying;
     private ContentObserver adbWifiObserver;
+    private BroadcastReceiver tetherReceiver;
     private SharedPreferences.OnSharedPreferenceChangeListener settingsListener;
     private NsdManager.DiscoveryListener discoveryListener;
     private int discoveryGeneration;
@@ -184,6 +187,13 @@ public class ReporterService extends Service {
         }
     };
 
+    private final Runnable widgetRefresh = new Runnable() {
+        @Override
+        public void run() {
+            AdbWidget.updateAll(ReporterService.this);
+        }
+    };
+
     private final Runnable wifiFallback = new Runnable() {
         @Override
         public void run() {
@@ -204,6 +214,9 @@ public class ReporterService extends Service {
      */
     static void sync(Context context) {
         Intent intent = new Intent(context, ReporterService.class);
+
+        // Device id and automatic mode are on the widget too
+        AdbWidget.updateAll(context);
 
         if (Prefs.isAuto(context)) {
             context.startForegroundService(intent.setAction(ACTION_RELOAD));
@@ -334,12 +347,42 @@ public class ReporterService extends Service {
         };
         Prefs.settings(this).registerOnSharedPreferenceChangeListener(settingsListener);
 
+        // Hotspot and tethering come and go without touching Wi-Fi, the widget lists them
+        IntentFilter tethering = new IntentFilter();
+        tethering.addAction("android.net.conn.TETHER_STATE_CHANGED");
+        tethering.addAction("android.net.wifi.WIFI_AP_STATE_CHANGED");
+        tetherReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+
+                // Addresses are assigned a moment after the state change
+                worker.removeCallbacks(widgetRefresh);
+                worker.postDelayed(widgetRefresh, 1500L);
+                worker.postDelayed(widgetRefresh, 5000L);
+            }
+        };
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(tetherReceiver, tethering, null, worker, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(tetherReceiver, tethering, null, worker);
+        }
+
         registerWifiCallback();
         worker.postDelayed(heartbeat, HEARTBEAT_MS);
     }
 
     private void teardown() {
         stopDiscovery();
+
+        if (tetherReceiver != null) {
+            try {
+                unregisterReceiver(tetherReceiver);
+            } catch (RuntimeException ignored) {
+            }
+            tetherReceiver = null;
+        }
+
         unregisterWifiCallback();
 
         if (adbWifiObserver != null) {
@@ -356,8 +399,10 @@ public class ReporterService extends Service {
                 .putString(Prefs.ST_RUNNING, "")
                 .putString(Prefs.ST_ENDPOINT, "")
                 .putString(Prefs.ST_SSID, "")
+                .putString(Prefs.ST_STATE, "")
                 .apply();
         event("Service stopped");
+        AdbWidget.updateAll(this);
 
         // A late notify from this thread may have re-posted it, a foreground notification is not affected
         notifications.cancel(NOTIFICATION_ID);
@@ -409,7 +454,10 @@ public class ReporterService extends Service {
 
             if (network.equals(wifiNetwork)) {
                 wifiIpv4 = wifiAddresses.get(network);
+                followWifiAddress();
             }
+
+            AdbWidget.updateAll(ReporterService.this);
         }
 
         @Override
@@ -508,6 +556,7 @@ public class ReporterService extends Service {
         currentSsid = ssid;
 
         if (!changed) {
+            followWifiAddress();
             return;
         }
 
@@ -705,6 +754,7 @@ public class ReporterService extends Service {
     // ------------------------------------------------------------------
 
     private void onHeartbeat() {
+        AdbWidget.updateAll(this);
 
         if (!onAllowedNetwork) {
             return;
@@ -957,18 +1007,11 @@ public class ReporterService extends Service {
         int port = info.getPort();
         Set<InetAddress> local = localAddresses();
         boolean isLocal = false;
-        String ip = null;
 
         for (InetAddress address : resolvedAddresses(info)) {
 
-            if (!local.contains(address)) {
-                continue;
-            }
-
-            isLocal = true;
-
-            if (address instanceof Inet4Address) {
-                ip = address.getHostAddress();
+            if (local.contains(address)) {
+                isLocal = true;
                 break;
             }
         }
@@ -978,12 +1021,12 @@ public class ReporterService extends Service {
             return;
         }
 
-        // Resolved to an IPv6 address only, report the Wi-Fi IPv4 instead
-        if (ip == null) {
-            ip = wifiIpv4;
-        }
+        // adbd listens on every interface and mDNS may well answer with the hotspot or USB
+        // tethering address. Only the Wi-Fi client address is useful to the server
+        String ip = wifiIpv4;
 
         if (ip == null || port <= 0) {
+            Log.i(TAG, "no Wi-Fi IPv4 address yet for port " + port);
             return;
         }
 
@@ -993,6 +1036,23 @@ public class ReporterService extends Service {
         }
 
         setEndpoint(ip, port, info.getServiceName());
+    }
+
+    /**
+     * Follows a new Wi-Fi address (DHCP renew, roaming) for the port already known.
+     */
+    private void followWifiAddress() {
+
+        if (!onAllowedNetwork || currentPort <= 0 || wifiIpv4 == null || wifiIpv4.equals(currentIp)) {
+            return;
+        }
+
+        if (probe(wifiIpv4, currentPort)) {
+            setEndpoint(wifiIpv4, currentPort, currentMdnsName);
+        } else {
+            clearEndpoint("Wi-Fi address changed");
+            startDiscovery();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1226,6 +1286,12 @@ public class ReporterService extends Service {
 
     private void status(String key, String value) {
         Prefs.status(this).edit().putString(key, value).apply();
+
+        // The widget shows these, apply() updates the in-memory copy it reads right away
+        if (Prefs.ST_ENDPOINT.equals(key) || Prefs.ST_SSID.equals(key)
+                || Prefs.ST_STATE.equals(key) || Prefs.ST_RUNNING.equals(key)) {
+            AdbWidget.updateAll(this);
+        }
     }
 
     private Notification buildNotification(String text) {
@@ -1264,6 +1330,7 @@ public class ReporterService extends Service {
         }
 
         notificationText = text;
+        status(Prefs.ST_STATE, text);
 
         if (!destroyed) {
             notifications.notify(NOTIFICATION_ID, buildNotification(text));

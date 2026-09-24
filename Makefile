@@ -63,14 +63,11 @@ DEVICE_ID ?=
 SSIDS ?=
 AUTO ?= true
 
-# Receiver for make serve, and the port of the OpenWrt receiver
+# Receiver for make serve
 PORT ?= 8765
 
-# The router make openwrt-install copies the receiver to, over ssh
-ROUTER ?= root@192.168.1.1
-
 .PHONY: help all android apk release direct install grant provision setup serve check src dist dist-direct \
-    openwrt-install openwrt-uninstall clean distclean
+    clean distclean
 
 help:
 	@echo "Wireless ADB Reporter $(VERSION)"
@@ -84,8 +81,6 @@ help:
 	@echo "  make provision           configure the app, URL= TOKEN= DEVICE_ID= SSIDS=a,b AUTO=true"
 	@echo "  make setup               install, grant and provision in one go"
 	@echo "  make serve               run the receiver here, PORT=$(PORT) TOKEN= with adb connect"
-	@echo "  make openwrt-install     put the receiver on a router, ROUTER=$(ROUTER) TOKEN= PORT="
-	@echo "  make openwrt-uninstall   remove it from the router again"
 	@echo "  make check               syntax check the receiver and build.sh, validate VERSION"
 	@echo "  make src                 only dist/$(NAME)-src.zip, no APK"
 	@echo "  make dist                dist/$(NAME)-$(VERSION).apk and $(NAME)-src.zip"
@@ -106,7 +101,6 @@ check:
 	@sh -n build.sh && echo "build.sh parses"
 	@sh -n server/adb-reporter.initd && echo "adb-reporter.initd parses"
 	@sh -n server/openwrt/adb && echo "openwrt/adb parses"
-	@sh -n server/openwrt/setup.sh && echo "openwrt/setup.sh parses"
 	@echo "$(VERSION)" | grep -Eq '^[0-9]{1,2}(\.[0-9]{1,2}){0,3}$$' \
 	    || { echo "VERSION must be up to four dot separated numbers below 100, got '$(VERSION)'"; exit 1; }
 	@echo "Version $(VERSION)"
@@ -187,19 +181,6 @@ dist: release src
 dist-direct: direct src
 	cp $(APK_DIRECT) dist/$(NAME)-$(VERSION).apk
 	@echo "dist/$(NAME)-$(VERSION).apk"
-
-# The shell receiver on an OpenWrt router: the CGI script, then setup.sh run
-# there for the UCI config and a separate uhttpd instance on PORT. Plain cat
-# over ssh, since OpenWrt's dropbear has no sftp server for scp
-openwrt-install:
-	ssh $(ROUTER) 'mkdir -p /www-adb-reporter/api && cat > /www-adb-reporter/api/adb \
-	    && chmod 755 /www-adb-reporter/api/adb' < server/openwrt/adb
-	ssh $(ROUTER) "sh -s -- '$(TOKEN)' '$(PORT)'" < server/openwrt/setup.sh
-
-openwrt-uninstall:
-	ssh $(ROUTER) 'uci -q delete uhttpd.adb_reporter; uci commit uhttpd; /etc/init.d/uhttpd reload; \
-	    rm -rf /www-adb-reporter /tmp/adb-reporter /etc/config/adb_reporter'
-	@echo "Removed from $(ROUTER)"
 
 clean:
 	rm -rf app/build build out dist

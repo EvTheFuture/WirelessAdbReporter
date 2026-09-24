@@ -16,6 +16,10 @@ How it works:
   location access, so it needs location permission "Allow all the time" and Location switched on.
 - Discovers its own `_adb-tls-connect._tcp` mDNS service with `NsdManager`, ignores other phones
   on the LAN, and verifies the port with a TCP probe.
+- Reports the Wi-Fi client address only. adbd listens on every interface, so with the hotspot,
+  USB tethering or a VPN up the same port answers on several addresses, and mDNS may resolve to
+  any of them. The app takes the port from mDNS and the address from the Wi-Fi network, and
+  follows the Wi-Fi address when it changes (DHCP renew, roaming).
 - Foreground service while automatic mode is on. Starts again after reboot and app updates.
 - If the network is not trusted for wireless debugging, Android shows an allow dialog. After three
   refusals the app pauses until the network changes or you press **Report now**.
@@ -31,7 +35,7 @@ How it works:
 3. Install the APK and grant the permissions, see [Permissions](#permissions):
 
    ```sh
-   adb install -r wireless-adb-reporter-1.3.apk
+   adb install -r wireless-adb-reporter-1.5.apk
    make grant
    ```
 
@@ -87,8 +91,20 @@ missing, and one button per missing permission.
 
 ## App screens
 
-- **Main:** status (automatic mode, device ID, networks, current SSID, endpoint, last report,
-  last event) and a checklist of what is still missing, with buttons to fix each item.
+- **Main:** the active address in large type, `adb connect 192.168.1.50:37123`, or why there is
+  none (not on a configured network, wireless debugging off, automatic mode off). Tap it to copy
+  `ip:port`. Under it every interface with its address and the port, the Wi-Fi one marked as
+  the reported one:
+
+  ```
+  Wi-Fi          wlan0    192.168.1.50:37123  <- reported
+  Hotspot        ap0      10.107.64.1:37123
+  USB tethering  rndis0   192.168.42.129:37123
+  Mobile         rmnet1   [2001:db8::5]:37123
+  ```
+
+  Below that: status (automatic mode, device ID, networks, current SSID, last report, last
+  event) and a checklist of what is still missing, with buttons to fix each item.
 - **Settings:**
   - *Activate and report automatically* switch
   - Networks (SSID): add by name, **Add current network**, remove
@@ -96,13 +112,30 @@ missing, and one button per missing permission.
 
 The notification has a **Report now** action.
 
+## Widget
+
+Long press the home screen > Widgets > Wireless ADB Reporter. A 3x1 card, resizable, also
+allowed on the lock screen where the launcher supports it:
+
+- the device ID, tap it to open the app
+- the active `ip:port` in large type, tap it to copy, or "not active" with the reason below
+- the SSID it is on
+- other local interfaces with the same port, e.g. `Hotspot 10.107.64.1:37123`, when the hotspot
+  or USB tethering is on (mobile data and VPN addresses are left out, the LAN cannot reach them).
+  Make the widget two cells high to see this line
+- the circular arrow reports now
+
+The service pushes every change to the widget, including the hotspot and tethering being
+switched on or off, so it has no polling of its own and costs no battery.
+
 ## Receiver
 
-Two receivers with the same API, pick one:
+Two receivers with the same API (the Python one under `/api/adb`, the OpenWrt one under
+`/cgi-bin/adb`), pick one:
 
 - `server/adb-reporter-server.py`, Python 3 standard library only, for a workstation or server.
   It can also run `adb connect` itself.
-- `server/openwrt/adb`, a shell CGI script for OpenWrt's uhttpd, see [OpenWrt](#openwrt).
+- `server/openwrt/adb`, a shell CGI script the router's own uhttpd runs per request, see [OpenWrt](#openwrt).
 
 ```sh
 ./server/adb-reporter-server.py --token change-me --auto-connect
@@ -134,39 +167,87 @@ for Alpine.
 
 ## OpenWrt
 
-The receiver fits on any OpenWrt router without extra packages: it is one busybox ash CGI
-script that uses `jsonfilter`, `jshn` and `uci`, which every image ships. It runs in its own
-uhttpd instance on port 8765, plain HTTP, so LuCI's HTTPS redirect on port 80 and 443 never
-gets in the way of the phones. The URLs are the same as the Python receiver's.
+The receiver is one CGI script, `server/openwrt/adb`, busybox ash with `jsonfilter`, `jshn` and
+`uci`, which every OpenWrt image ships. It is not a daemon: the router's own uhttpd (the one
+serving LuCI) starts it for each request, it answers and exits. Nothing runs in between, nothing
+extra is installed and no existing file is edited.
+
+### Install
+
+Check first that the web server does not redirect HTTP to HTTPS, the phones post plain HTTP and
+Android does not follow a redirect from http to https:
 
 ```sh
 #!/bin/sh
-make openwrt-install ROUTER=root@192.168.1.1 TOKEN=change-me
-make openwrt-uninstall ROUTER=root@192.168.1.1
+ssh root@192.168.1.1 uci -q get uhttpd.main.redirect_https   # 0 or empty is fine
 ```
 
-What the install does, if you rather do it by hand:
+If it prints `1`, see [HTTPS redirect](#https-redirect) below. Otherwise copy the script, it is
+the only file needed. Dropbear has no sftp, so `cat` over ssh instead of scp:
 
 ```sh
 #!/bin/sh
-ssh root@192.168.1.1 'mkdir -p /www-adb-reporter/api && cat > /www-adb-reporter/api/adb \
-    && chmod 755 /www-adb-reporter/api/adb' < server/openwrt/adb
-ssh root@192.168.1.1 "sh -s -- change-me 8765" < server/openwrt/setup.sh
+ssh root@192.168.1.1 'cat > /www/cgi-bin/adb && chmod 755 /www/cgi-bin/adb' < server/openwrt/adb
 ```
 
-`setup.sh` creates `/etc/config/adb_reporter` (existing values are kept) and a uhttpd section
-`adb_reporter` listening on port 8765 with `/www-adb-reporter` as document root and `/api` as
-CGI prefix, then reloads uhttpd. Only uhttpd is needed, it is there on every image with LuCI,
-otherwise `apk add uhttpd` (25.x) or `opkg install uhttpd`.
-
-Point the phones at `http://<router>:8765/api/adb`, then from any machine on the LAN:
+Optionally the settings, for a token (without the file: no token, reports in `/tmp/adb-reporter`):
 
 ```sh
 #!/bin/sh
-adb connect "$(curl -s -H 'Authorization: Bearer change-me' http://192.168.1.1:8765/api/adb/pixel8/connect)"
+ssh root@192.168.1.1 'cat > /etc/config/adb_reporter && chmod 600 /etc/config/adb_reporter' < server/openwrt/adb_reporter.config
+ssh root@192.168.1.1 "uci set adb_reporter.main.token=change-me && uci commit adb_reporter"
 ```
 
-Settings in `/etc/config/adb_reporter`, read on every request so no restart is needed:
+That is all, no restart. The API lives under `/cgi-bin/adb` on the router's normal port 80:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| POST | `/cgi-bin/adb` | Store a report |
+| GET | `/cgi-bin/adb` | All devices as JSON |
+| GET | `/cgi-bin/adb/<device_id>` | One device as JSON |
+| GET | `/cgi-bin/adb/<device_id>/connect` | Plain `ip:port` |
+
+Server URL in the app: `http://192.168.1.1/cgi-bin/adb`. From any machine on the LAN:
+
+```sh
+#!/bin/sh
+adb connect "$(curl -s -H 'Authorization: Bearer change-me' http://192.168.1.1/cgi-bin/adb/pixel8/connect)"
+```
+
+### Remove
+
+```sh
+#!/bin/sh
+ssh root@192.168.1.1 'rm -f /www/cgi-bin/adb /etc/config/adb_reporter; rm -rf /tmp/adb-reporter'
+```
+
+Those are the only three things it ever creates: the script, the optional settings file, and the
+reports in RAM (`/tmp`, gone after a reboot anyway). The router is then exactly as before.
+
+`/www/cgi-bin` and `/etc/config/adb_reporter` are not part of any package, so a sysupgrade drops
+the script; `/etc/config` is kept. To keep the script too, add the line `/www/cgi-bin/adb` to
+`/etc/sysupgrade.conf` (and remove it again when you uninstall).
+
+### HTTPS redirect
+
+With `redirect_https 1` (set by luci-ssl on many images) a second uhttpd section on its own port
+serves plain HTTP next to LuCI. Add to `/etc/config/uhttpd`:
+
+```
+config uhttpd 'adb_reporter'
+	list listen_http '0.0.0.0:8765'
+	option home '/www'
+	option cgi_prefix '/cgi-bin'
+	option no_dirlists '1'
+```
+
+then `/etc/init.d/uhttpd reload`; the URL is `http://192.168.1.1:8765/cgi-bin/adb`. That is a
+second uhttpd process, the script itself is still started per request. To remove it, delete the
+section again by hand in the editor (`uci delete` + `uci commit` would drop the file's comments).
+
+### Settings
+
+`/etc/config/adb_reporter`, read on every request, so changes apply at once:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -180,8 +261,8 @@ Settings in `/etc/config/adb_reporter`, read on every request so no restart is n
 Differences from the Python receiver: the device ID is also the file name, so it may only
 contain letters, digits, `.`, `-` and `_` (the app's default ID always does). There is no
 built-in `adb connect`, use the hook or run it from the workstation. Changes are logged to
-syslog, `logread -e adb-reporter` shows them. The firewall's default LAN input policy
-already allows port 8765, WAN stays closed.
+syslog, `logread -e adb-reporter` shows them. The firewall's default LAN input policy already
+allows the web server, WAN stays closed.
 
 ## Report payload
 

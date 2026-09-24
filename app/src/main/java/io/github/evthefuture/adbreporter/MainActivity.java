@@ -29,6 +29,9 @@ public class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
 
+    private TextView endpointView;
+    private TextView endpointHint;
+    private TextView interfacesView;
     private TextView statusView;
     private Button notificationsButton;
     private Button locationButton;
@@ -84,6 +87,26 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         View scroll = Ui.scrollRoot(this, root);
         root.addView(Ui.title(this, "Wireless ADB Reporter"));
+
+        // The active address first, tap either line to copy it
+        View.OnClickListener copy = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                AdbWidget.copyEndpoint(MainActivity.this);
+            }
+        };
+        endpointView = Ui.endpoint(this);
+        endpointView.setOnClickListener(copy);
+        root.addView(endpointView);
+        endpointHint = Ui.body(this, "");
+        endpointHint.setTextIsSelectable(false);
+        endpointHint.setOnClickListener(copy);
+        root.addView(endpointHint);
+
+        // Every interface adbd answers on, the Wi-Fi one is what goes to the server
+        root.addView(Ui.heading(this, "Interfaces"));
+        interfacesView = Ui.mono(this);
+        root.addView(interfacesView);
 
         statusView = Ui.mono(this);
         root.addView(statusView);
@@ -222,7 +245,6 @@ public class MainActivity extends Activity {
         text.append("Current SSID   : ").append(ssid.isEmpty() ? "-" : ssid)
                 .append(ssids.contains(ssid) ? "  (match)" : "").append('\n');
         text.append("Wireless debug : ").append(onOff(Prefs.isWirelessDebuggingEnabled(this))).append('\n');
-        text.append("Endpoint       : ").append(endpoint.isEmpty() ? "-" : endpoint).append('\n');
         text.append("Last report    : ").append(status.getString(Prefs.ST_REPORT, "-")).append('\n');
         text.append("Last event     : ").append(status.getString(Prefs.ST_EVENT, "-")).append("\n\n");
 
@@ -238,11 +260,69 @@ public class MainActivity extends Activity {
         text.append(check(auto)).append("Activate and report automatically");
 
         statusView.setText(text);
+
+        interfacesView.setText(interfaceTable(endpoint));
+
+        if (endpoint.isEmpty()) {
+            endpointView.setText("adb connect: not active");
+            endpointView.setAlpha(0.6f);
+            endpointHint.setText(AdbWidget.idleText(this));
+        } else {
+            endpointView.setText("adb connect " + endpoint);
+            endpointView.setAlpha(1f);
+            endpointHint.setText(ssid.isEmpty() ? "Tap to copy ip:port" : "On " + ssid + ", tap to copy ip:port");
+        }
         notificationsButton.setVisibility(notifications ? View.GONE : View.VISIBLE);
         locationButton.setVisibility(fine ? View.GONE : View.VISIBLE);
         backgroundButton.setVisibility(fine && !background ? View.VISIBLE : View.GONE);
         locationServicesButton.setVisibility(locationOn ? View.GONE : View.VISIBLE);
         reportButton.setVisibility(auto ? View.VISIBLE : View.GONE);
+    }
+
+    /**
+     * One row per address: label, interface, ip:port and a mark on the reported one.
+     */
+    private String interfaceTable(String endpoint) {
+        String port = Interfaces.portOf(endpoint);
+        List<Interfaces.Entry> entries = Interfaces.list(this);
+        StringBuilder text = new StringBuilder();
+
+        if (entries.isEmpty()) {
+            return "No network interfaces with an address";
+        }
+
+        for (Interfaces.Entry entry : entries) {
+            String address = entry.endpoint(port);
+            boolean reported = !endpoint.isEmpty() && address.equals(endpoint);
+
+            if (text.length() > 0) {
+                text.append('\n');
+            }
+
+            text.append(pad(entry.label, 14)).append(pad(entry.name, 8)).append(address);
+
+            if (reported) {
+                text.append("  <- reported");
+            }
+        }
+
+        if (port.isEmpty()) {
+            text.append("\n\nNo adb port yet, addresses only");
+        } else {
+            text.append("\n\nThe port answers on every interface, only Wi-Fi is sent to the server");
+        }
+
+        return text.toString();
+    }
+
+    private static String pad(String value, int width) {
+        StringBuilder out = new StringBuilder(value);
+
+        while (out.length() < width) {
+            out.append(' ');
+        }
+
+        return out.append(' ').toString();
     }
 
     private static String check(boolean ok) {
