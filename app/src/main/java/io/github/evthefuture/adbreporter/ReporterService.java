@@ -1137,7 +1137,6 @@ public class ReporterService extends Service {
             body.put("serial", serialFromMdnsName(currentMdnsName));
             body.put("mdns_name", currentMdnsName);
             body.put("ssid", currentSsid);
-            body.put("profile", profile.name);
             body.put("ip", currentIp);
             body.put("port", currentPort);
             body.put("connect", endpoint);

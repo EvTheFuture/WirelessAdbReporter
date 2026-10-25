@@ -1,34 +1,167 @@
 #!/bin/sh
 #
-# Wireless ADB Reporter receiver for OpenWrt, a CGI script for uhttpd.
+# Wireless ADB Reporter receiver as a CGI script, the same API as
+# server/adb-reporter-server.py without Python. Not a daemon: the web server
+# starts it for each request and it exits when it has answered. With the
+# script at <cgi prefix>/adb the API is:
 #
-# The same API as server/adb-reporter-server.py, without Python. Installed as
-# /usr/share/adb-reporter/www/api/adb, served by its own uhttpd with cgi prefix
-# /api (see adb-reporter.init), so the URLs are identical:
-#
-#   POST /api/adb                      JSON report from the phone
-#   GET  /api/adb                      all devices as JSON
-#   GET  /api/adb/<device_id>          one device as JSON
-#   GET  /api/adb/<device_id>/connect  plain "ip:port", for scripts
+#   POST <prefix>/adb                      JSON report from the phone
+#   GET  <prefix>/adb                      all devices as JSON
+#   GET  <prefix>/adb/<device_id>          one device as JSON
+#   GET  <prefix>/adb/<device_id>/connect  plain "ip:port", for scripts
 #
 # Lookups match device_id first, then the adb serial, then the name, all
-# case insensitive. Needs only what every OpenWrt image ships: busybox ash,
-# jsonfilter and jshn (jshn.sh needs ash, it does not run under dash or bash).
-# Settings live in /etc/config/adb_reporter.
-
-. /usr/share/libubox/jshn.sh
+# case insensitive.
+#
+# Runs on OpenWrt and on any other system with a CGI capable web server
+# (uhttpd, busybox httpd, lighttpd, nginx with fcgiwrap, ...):
+#
+#   OpenWrt   busybox ash, jsonfilter and jshn, settings in /etc/config/adb_reporter
+#   elsewhere a POSIX sh and jq, settings in /etc/adb-reporter.conf, or the
+#             file named by ADB_REPORTER_CONF in the CGI environment
+#
+# jq is used whenever it is installed, so OpenWrt with jq takes that path too.
 
 MAX_BODY=65536
+
+# ----------------------------------------------------------------------
+# JSON backend
+# ----------------------------------------------------------------------
+
+if command -v jq >/dev/null 2>&1; then
+    JSON=jq
+elif command -v jsonfilter >/dev/null 2>&1 && [ -f /usr/share/libubox/jshn.sh ]; then
+    JSON=jshn
+    . /usr/share/libubox/jshn.sh
+else
+    printf 'Status: 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n'
+    printf '{ "error": "jq, or jsonfilter and jshn, is required" }\n'
+    exit 0
+fi
+
+# One field of a JSON file as text, empty when missing
+json_file_field() {
+
+    if [ "$JSON" = jq ]; then
+        jq -r --arg f "$2" '.[$f] // empty | tostring' "$1" 2>/dev/null
+    else
+        jsonfilter -i "$1" -e "@.$2" 2>/dev/null
+    fi
+}
+
+# True when the string is a JSON object
+json_is_object() {
+
+    if [ "$JSON" = jq ]; then
+        [ "$(printf '%s' "$1" | jq -r 'type' 2>/dev/null)" = object ]
+    else
+        [ "$(jsonfilter -s "$1" -t '@' 2>/dev/null)" = object ]
+    fi
+}
+
+# Shell assignments r_<field>=<quoted value> for the report fields in $1
+json_report_vars() {
+    local fields="device_id name model serial ip port ssid android reason"
+    local field body="$1"
+
+    if [ "$JSON" = jq ]; then
+        printf '%s' "$body" | jq -r --arg fields "$fields" '
+            . as $r
+            | $fields | split(" ")[]
+            | "r_\(.)=" + (($r[.] // "") | tostring | @sh)' 2>/dev/null
+        return
+    fi
+
+    # The positional parameters are reused for the -e arguments, the body was saved above
+    set --
+
+    for field in $fields; do
+        set -- "$@" -e "r_$field=@.$field"
+    done
+
+    jsonfilter -s "$body" "$@" 2>/dev/null
+}
+
+# The stored record from the r_* variables and a few more, on stdout
+json_record() {
+
+    if [ "$JSON" = jq ]; then
+        jq -n \
+            --arg device_id "$id" --arg name "${r_name:-$id}" --arg model "$r_model" \
+            --arg serial "$r_serial" --arg ip "$r_ip" --argjson port "$r_port" \
+            --arg connect "$endpoint" --arg ssid "$r_ssid" --arg android "$r_android" \
+            --arg reason "$r_reason" --argjson reported_at "$now" \
+            --arg remote_addr "$REMOTE_ADDR" \
+            '$ARGS.named'
+        return
+    fi
+
+    json_init
+    json_add_string device_id "$id"
+    json_add_string name "${r_name:-$id}"
+    json_add_string model "$r_model"
+    json_add_string serial "$r_serial"
+    json_add_string ip "$r_ip"
+    json_add_int port "$r_port"
+    json_add_string connect "$endpoint"
+    json_add_string ssid "$r_ssid"
+    json_add_string android "$r_android"
+    json_add_string reason "$r_reason"
+    json_add_int reported_at "$now"
+    json_add_string remote_addr "$REMOTE_ADDR"
+    json_dump
+}
+
+# A stored record plus age_seconds and stale. $2 is "pretty" for indented output
+describe() {
+    local reported_at age now
+
+    now=$(date +%s)
+
+    if [ "$JSON" = jq ]; then
+        jq $([ "$2" = pretty ] || echo -c) --argjson now "$now" --argjson stale_after "$STALE_AFTER" '
+            (($now - (.reported_at // 0)) | if . < 0 then 0 else . end) as $age
+            | . + { age_seconds: $age, stale: ($age > $stale_after) }' "$1" 2>/dev/null
+        return
+    fi
+
+    json_load "$(cat "$1")" 2>/dev/null || return 1
+    json_get_var reported_at reported_at
+    age=$((now - ${reported_at:-0}))
+
+    if [ "$age" -lt 0 ]; then
+        age=0
+    fi
+
+    json_add_int age_seconds "$age"
+    json_add_boolean stale "$([ "$age" -gt "$STALE_AFTER" ] && echo 1 || echo 0)"
+    json_dump $([ "$2" = pretty ] && echo -i)
+}
 
 # ----------------------------------------------------------------------
 # Settings
 # ----------------------------------------------------------------------
 
-# One option from /etc/config/adb_reporter, or the default when unset
-option() {
-    local value
+CONF=${ADB_REPORTER_CONF:-/etc/adb-reporter.conf}
 
-    value=$(uci -q get "adb_reporter.main.$1" 2>/dev/null)
+# One option, or the default when unset. On OpenWrt from uci, otherwise from
+# "name=value" lines in $CONF. The file is read, never sourced, so it cannot
+# run code as the web server user
+option() {
+    local value=""
+
+    if command -v uci >/dev/null 2>&1 && [ -f /etc/config/adb_reporter ]; then
+        value=$(uci -q get "adb_reporter.main.$1" 2>/dev/null)
+    elif [ -r "$CONF" ]; then
+        value=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" | tail -n 1)
+
+        # Surrounding single or double quotes are optional
+        value=${value%\"}
+        value=${value#\"}
+        value=${value%\'}
+        value=${value#\'}
+    fi
+
     printf '%s' "${value:-$2}"
 }
 
@@ -51,7 +184,7 @@ log() {
     logger -t adb-reporter "$*" 2>/dev/null
 }
 
-# CGI headers, uhttpd turns the Status header into the response line
+# CGI headers, the web server turns the Status header into the response line
 headers() {
     printf 'Status: %s\r\nContent-Type: %s; charset=utf-8\r\nCache-Control: no-store\r\n\r\n' "$1" "$2"
 }
@@ -113,7 +246,7 @@ find_device() {
                 continue
             fi
 
-            value=$(jsonfilter -i "$file" -e "@.$field" 2>/dev/null)
+            value=$(json_file_field "$file" "$field")
 
             if [ -n "$value" ] && [ "$(lower "$value")" = "$key" ]; then
                 echo "$file"
@@ -123,24 +256,6 @@ find_device() {
     done
 
     return 1
-}
-
-# A stored record plus age_seconds and stale, as JSON. $2 is passed to json_dump
-describe() {
-    local reported_at age now
-
-    now=$(date +%s)
-    json_load "$(cat "$1")" 2>/dev/null || return 1
-    json_get_var reported_at reported_at
-    age=$((now - ${reported_at:-0}))
-
-    if [ "$age" -lt 0 ]; then
-        age=0
-    fi
-
-    json_add_int age_seconds "$age"
-    json_add_boolean stale "$([ "$age" -gt "$STALE_AFTER" ] && echo 1 || echo 0)"
-    json_dump $2
 }
 
 # ----------------------------------------------------------------------
@@ -172,15 +287,12 @@ handle_post() {
 
     body=$(head -c "$length")
 
-    if [ "$(jsonfilter -s "$body" -t '@' 2>/dev/null)" != "object" ]; then
+    if ! json_is_object "$body"; then
         fail "400 Bad Request" "bad report: not a JSON object"
     fi
 
-    # jsonfilter prints shell-quoted assignments, missing fields stay empty
-    eval "$(jsonfilter -s "$body" \
-        -e 'r_device_id=@.device_id' -e 'r_name=@.name' -e 'r_model=@.model' \
-        -e 'r_serial=@.serial' -e 'r_ip=@.ip' -e 'r_port=@.port' -e 'r_ssid=@.ssid' \
-        -e 'r_android=@.android' -e 'r_reason=@.reason' 2>/dev/null)"
+    # Both backends print shell-quoted assignments, missing fields stay empty
+    eval "$(json_report_vars "$body")"
 
     case "$r_ip" in
         ''|*[!0-9A-Fa-f.:]*) fail "400 Bad Request" "bad report: ip" ;;
@@ -208,28 +320,17 @@ handle_post() {
 
     key=$(lower "$id")
     file="$STATE_DIR/$key.json"
-    previous=$(jsonfilter -i "$file" -e '@.connect' 2>/dev/null)
+    previous=$(json_file_field "$file" connect)
     now=$(date +%s)
-
-    json_init
-    json_add_string device_id "$id"
-    json_add_string name "${r_name:-$id}"
-    json_add_string model "$r_model"
-    json_add_string serial "$r_serial"
-    json_add_string ip "$r_ip"
-    json_add_int port "$r_port"
-    json_add_string connect "$endpoint"
-    json_add_string ssid "$r_ssid"
-    json_add_string android "$r_android"
-    json_add_string reason "$r_reason"
-    json_add_int reported_at "$now"
-    json_add_string remote_addr "$REMOTE_ADDR"
 
     # Written next to the target and renamed, so readers never see half a file
     umask 077
     mkdir -p "$STATE_DIR" || fail "500 Internal Server Error" "state directory not writable"
     tmp="$STATE_DIR/.$key.$$"
-    json_dump > "$tmp" && mv -f "$tmp" "$file" || fail "500 Internal Server Error" "could not store report"
+    json_record > "$tmp" && mv -f "$tmp" "$file" || {
+        rm -f "$tmp"
+        fail "500 Internal Server Error" "could not store report"
+    }
 
     changed=false
 
@@ -275,7 +376,7 @@ handle_get() {
             key=${key%.json}
 
             # A damaged file is skipped instead of breaking the whole list
-            if ! record=$(describe "$file"); then
+            if ! record=$(describe "$file") || [ -z "$record" ]; then
                 continue
             fi
 
@@ -311,12 +412,12 @@ handle_get() {
 
     if [ "$action" = "connect" ]; then
         headers "200 OK" text/plain
-        jsonfilter -i "$file" -e '@.connect'
+        json_file_field "$file" connect
         return
     fi
 
     headers "200 OK" application/json
-    describe "$file" -i
+    describe "$file" pretty
 }
 
 case "$REQUEST_METHOD" in

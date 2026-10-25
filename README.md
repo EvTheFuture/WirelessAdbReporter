@@ -163,7 +163,8 @@ Two receivers with the same API (the Python one under `/api/adb`, the OpenWrt on
 
 - `server/adb-reporter-server.py`, Python 3 standard library only, for a workstation or server.
   It can also run `adb connect` itself.
-- `server/openwrt/adb`, a shell CGI script the router's own uhttpd runs per request, see [OpenWrt](#openwrt).
+- `server/openwrt/adb`, a shell CGI script any CGI capable web server runs per request, see
+  [OpenWrt](#openwrt) and [Any web server](#any-web-server-alpine).
 
 ```sh
 ./server/adb-reporter-server.py --token change-me --auto-connect
@@ -196,9 +197,9 @@ for Alpine.
 ## OpenWrt
 
 The receiver is one CGI script, `server/openwrt/adb`, busybox ash with `jsonfilter`, `jshn` and
-`uci`, which every OpenWrt image ships. It is not a daemon: the router's own uhttpd (the one
-serving LuCI) starts it for each request, it answers and exits. Nothing runs in between, nothing
-extra is installed and no existing file is edited.
+`uci`, which every OpenWrt image ships (or `jq` when installed). It is not a daemon: the
+router's own uhttpd (the one serving LuCI) starts it for each request, it answers and exits.
+Nothing runs in between, nothing extra is installed and no existing file is edited.
 
 ### Install
 
@@ -292,6 +293,48 @@ built-in `adb connect`, use the hook or run it from the workstation. Changes are
 syslog, `logread -e adb-reporter` shows them. The firewall's default LAN input policy already
 allows the web server, WAN stays closed.
 
+## Any web server (Alpine)
+
+The same CGI script runs outside OpenWrt under any web server that speaks CGI. Instead of
+`jsonfilter`, `jshn` and `uci` it then needs `jq`, and reads its settings from
+`/etc/adb-reporter.conf` (same option names, `name=value` lines, see
+`server/adb-reporter.conf`). A web server that can set CGI environment variables can point
+`ADB_REPORTER_CONF` at another file.
+
+On Alpine with uhttpd as its own OpenRC instance:
+
+```sh
+#!/bin/sh
+apk add jq uhttpd uhttpd-openrc
+
+# The script under the CGI prefix, its settings and state, all readable by the uhttpd user
+install -D -m 755 server/openwrt/adb /var/www/adb-reporter/api/adb
+install -m 640 -g uhttpd server/adb-reporter.conf /etc/adb-reporter.conf
+install -d -m 750 -o uhttpd -g uhttpd /var/lib/adb-reporter
+
+# A second uhttpd instance with its own conf.d file
+ln -s uhttpd /etc/init.d/uhttpd.adb_reporter
+cat > /etc/conf.d/uhttpd.adb_reporter <<'CONF'
+supervisor="supervise-daemon"
+listen_http="0.0.0.0:8765 [::]:8765"
+home="/var/www/adb-reporter"
+cgi_prefix="/api"
+no_dirlists=yes
+rfc1918_filter=no
+max_requests=5
+script_timeout=15
+network_timeout=15
+http_keepalive=0
+CONF
+
+rc-update add uhttpd.adb_reporter default
+rc-service uhttpd.adb_reporter start
+```
+
+Server URL in the app: `http://<host>:8765/api/adb`. Set the token in `/etc/adb-reporter.conf`.
+busybox `httpd` works the same way with the script in `cgi-bin/` of its home directory. The
+OpenWrt tools are used whenever `jq` is missing, and `jq` whenever it is installed.
+
 ## Report payload
 
 ```json
@@ -303,7 +346,6 @@ allows the web server, WAN stays closed.
   "serial": "3A1B2C...",
   "mdns_name": "adb-3A1B2C...-Xy12Ab",
   "ssid": "HomeNet",
-  "profile": "Default",
   "ip": "192.168.1.50",
   "port": 37123,
   "connect": "192.168.1.50:37123",
