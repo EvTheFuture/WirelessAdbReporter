@@ -3,7 +3,8 @@
 Android app (Android 11+). When **Activate and report automatically** is on and the phone
 is connected to one of the configured SSIDs, it switches **Wireless debugging** on, finds
 the random TLS port adbd listens on, and POSTs `ip:port` to a REST endpoint whenever it
-changes (plus a heartbeat every 5 minutes). On any other network it does nothing, and if
+changes (plus a heartbeat every 5 minutes). Each SSID belongs to a server profile, so home
+networks can report to one server and lab networks to another. On any other network it does nothing, and if
 it was the one that turned wireless debugging on, it turns it off again.
 
 A small receiver stores the reports, answers "what is the ip and port of device X", and can
@@ -44,11 +45,30 @@ How it works:
    ```sh
    adb shell am start -n io.github.evthefuture.adbreporter/.ProvisionActivity \
        --es url http://192.168.1.10:8765/api/adb --es token change-me \
-       --es device_id pixel8 --es ssids "HomeNet,LabNet" --ez auto true
+       --es device_id pixel8 --es ssids "HomeNet,HomeNet-5G" --ez auto true
    ```
 
-   Every extra is optional, `ssids` replaces the whole list. The provisioning screen only accepts
-   callers holding `WRITE_SECURE_SETTINGS` (the adb shell), so other apps cannot reconfigure it.
+   Every extra is optional. Without `profile` the settings go to the profile `Default`. A second
+   server for other networks is one more call with its own profile name:
+
+   ```sh
+   adb shell am start -n io.github.evthefuture.adbreporter/.ProvisionActivity \
+       --es profile lab --es url http://10.0.0.1/cgi-bin/adb --es token lab-secret \
+       --es ssids "LabNet"
+   ```
+
+   | Extra | Meaning |
+   | --- | --- |
+   | `profile` | Profile to create or update, `Default` when left out |
+   | `url`, `token` | Server of that profile |
+   | `ssids` | Comma separated, replaces the profile's list. The SSIDs are taken away from every other profile |
+   | `device_id` | With `profile`: override for that profile only (empty clears it). Without: the global device ID |
+   | `remove_profile` | Deletes a profile by name |
+   | `auto` | The automatic mode switch |
+
+   `make provision PROFILE=lab URL=... TOKEN=... SSIDS=LabNet` does the same. The provisioning
+   screen only accepts callers holding `WRITE_SECURE_SETTINGS` (the adb shell), so other apps
+   cannot reconfigure it.
 
 ## Permissions
 
@@ -103,12 +123,20 @@ missing, and one button per missing permission.
   Mobile         rmnet1   [2001:db8::5]:37123
   ```
 
-  Below that: status (automatic mode, device ID, networks, current SSID, last report, last
-  event) and a checklist of what is still missing, with buttons to fix each item.
+  Below that: status (automatic mode, device ID, networks, current SSID, profile and server,
+  last report, last event) and a checklist of what is still missing, with buttons to fix each item.
 - **Settings:**
   - *Activate and report automatically* switch
-  - Networks (SSID): add by name, **Add current network**, remove
-  - Server URL, bearer token, Device ID (defaults to a slug of the phone's name)
+  - Device ID (defaults to a slug of the phone's name)
+  - Server profiles, as many as needed, each with a name, server URL, bearer token, an optional
+    device ID override and its networks (SSID): add by name, **Add current network**, remove.
+    An SSID belongs to one profile only, adding it to a second one is refused.
+
+  Settings from before profiles existed become the profile `Default` on first start.
+
+  When the phone moves to a network of another profile, the endpoint is reported to that
+  profile's server right away. A pending retry always goes to the server of the network the
+  phone is on now, never to the one it left.
 
 The notification has a **Report now** action.
 
@@ -275,6 +303,7 @@ allows the web server, WAN stays closed.
   "serial": "3A1B2C...",
   "mdns_name": "adb-3A1B2C...-Xy12Ab",
   "ssid": "HomeNet",
+  "profile": "Default",
   "ip": "192.168.1.50",
   "port": 37123,
   "connect": "192.168.1.50:37123",

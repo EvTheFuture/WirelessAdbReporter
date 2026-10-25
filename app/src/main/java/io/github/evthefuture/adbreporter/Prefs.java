@@ -7,9 +7,7 @@ import android.content.pm.PackageManager;
 import android.location.LocationManager;
 import android.os.Build;
 import android.provider.Settings;
-import android.text.TextUtils;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -26,9 +24,14 @@ final class Prefs {
 
     // User settings
     static final String AUTO = "auto";
+    static final String DEVICE_ID = "device_id";
+
+    // JSON array of server profiles, see Profiles
+    static final String PROFILES = "profiles";
+
+    // Keys from before profiles existed, only read once to migrate them
     static final String URL = "url";
     static final String TOKEN = "token";
-    static final String DEVICE_ID = "device_id";
     static final String SSIDS = "ssids";
 
     // Status written by the service and shown by the activities
@@ -37,6 +40,9 @@ final class Prefs {
     static final String ST_ENDPOINT = "endpoint";
     static final String ST_REPORT = "report";
     static final String ST_EVENT = "event";
+
+    // Name of the profile the current network belongs to, empty when none
+    static final String ST_PROFILE = "profile";
 
     // One line summary of what the service is doing, the notification text
     static final String ST_STATE = "state";
@@ -64,29 +70,11 @@ final class Prefs {
     // SSIDs
     // ------------------------------------------------------------------
 
-    static List<String> ssids(Context context) {
-        String raw = settings(context).getString(SSIDS, "");
-        List<String> result = new ArrayList<>();
-
-        for (String line : raw.split("\n")) {
-
-            if (!line.isEmpty() && !result.contains(line)) {
-                result.add(line);
-            }
-        }
-
-        return result;
-    }
-
-    static void setSsids(Context context, List<String> ssids) {
-        settings(context).edit().putString(SSIDS, TextUtils.join("\n", ssids)).apply();
-    }
-
     /**
-     * SSIDs are case sensitive, so match exactly.
+     * Every configured SSID across all server profiles.
      */
-    static boolean isSsidAllowed(Context context, String ssid) {
-        return ssid != null && ssids(context).contains(ssid);
+    static List<String> ssids(Context context) {
+        return Profiles.allSsids(context);
     }
 
     /**

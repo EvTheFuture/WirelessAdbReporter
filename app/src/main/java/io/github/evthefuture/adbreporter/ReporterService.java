@@ -133,6 +133,9 @@ public class ReporterService extends Service {
     private int currentPort;
     private String currentMdnsName;
     private String lastReportedEndpoint;
+
+    // Profile the last successful report went to, a new profile means a new server
+    private String lastReportedProfile;
     private long lastEnableAttempt;
 
     // Touched from both the main and the worker thread
@@ -333,7 +336,7 @@ public class ReporterService extends Service {
         };
         getContentResolver().registerContentObserver(uri, false, adbWifiObserver);
 
-        // SSID list, URL, token or device id edited in the settings screen
+        // Server profiles or the device id edited in the settings screen
         settingsListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
             @Override
             public void onSharedPreferenceChanged(SharedPreferences prefs, final String key) {
@@ -399,6 +402,7 @@ public class ReporterService extends Service {
                 .putString(Prefs.ST_RUNNING, "")
                 .putString(Prefs.ST_ENDPOINT, "")
                 .putString(Prefs.ST_SSID, "")
+                .putString(Prefs.ST_PROFILE, "")
                 .putString(Prefs.ST_STATE, "")
                 .apply();
         event("Service stopped");
@@ -592,10 +596,12 @@ public class ReporterService extends Service {
     }
 
     /**
-     * Central decision: act only while the current SSID is in the list.
+     * Central decision: act only while the current SSID belongs to a server profile.
      */
     private void evaluate(boolean force) {
-        boolean allowed = wifiNetwork != null && Prefs.isSsidAllowed(this, currentSsid);
+        Profiles.Profile profile = wifiNetwork == null ? null : Profiles.forSsid(this, currentSsid);
+        boolean allowed = profile != null;
+        status(Prefs.ST_PROFILE, allowed ? profile.name : "");
 
         if (!allowed) {
             onAllowedNetwork = false;
@@ -644,15 +650,15 @@ public class ReporterService extends Service {
     }
 
     private void onSettingChanged(String key) {
+        boolean profiles = Prefs.PROFILES.equals(key);
 
-        if (Prefs.SSIDS.equals(key)) {
+        // SSIDs may have moved between profiles or been removed
+        if (profiles) {
             evaluate(false);
-            return;
         }
 
-        boolean serverSetting = Prefs.URL.equals(key) || Prefs.TOKEN.equals(key) || Prefs.DEVICE_ID.equals(key);
-
-        if (serverSetting && onAllowedNetwork && currentPort > 0) {
+        // URL, token or device ID may have changed, resend to the server now in charge
+        if ((profiles || Prefs.DEVICE_ID.equals(key)) && onAllowedNetwork && currentPort > 0) {
             report("settings");
         }
     }
@@ -1070,6 +1076,14 @@ public class ReporterService extends Service {
         if (!endpoint.equals(lastReportedEndpoint)) {
             event("Found " + endpoint);
             report("changed");
+            return;
+        }
+
+        // Same endpoint but the network now belongs to a profile not told yet
+        Profiles.Profile profile = Profiles.forSsid(this, currentSsid);
+
+        if (profile != null && !profile.name.equals(lastReportedProfile)) {
+            report("changed");
         }
     }
 
@@ -1093,12 +1107,22 @@ public class ReporterService extends Service {
     }
 
     private void report(String reason) {
-        SharedPreferences settings = Prefs.settings(this);
-        String url = settings.getString(Prefs.URL, "");
-        String token = settings.getString(Prefs.TOKEN, "");
+
+        // Looked up at send time, so a retry never goes to the server of a network left behind
+        Profiles.Profile profile = Profiles.forSsid(this, currentSsid);
+
+        if (profile == null) {
+            worker.removeCallbacks(retryReport);
+            status(Prefs.ST_REPORT, "Not reported, " + currentSsid + " belongs to no profile");
+            return;
+        }
+
+        String url = profile.url;
+        String token = profile.token;
 
         if (url == null || url.trim().isEmpty()) {
-            status(Prefs.ST_REPORT, "No server URL configured");
+            worker.removeCallbacks(retryReport);
+            status(Prefs.ST_REPORT, "No server URL in profile " + profile.name);
             return;
         }
 
@@ -1106,13 +1130,14 @@ public class ReporterService extends Service {
         JSONObject body = new JSONObject();
 
         try {
-            body.put("device_id", Prefs.deviceId(this));
+            body.put("device_id", profile.effectiveDeviceId(this));
             body.put("name", Prefs.deviceName(this));
             body.put("model", Build.MODEL);
             body.put("manufacturer", Build.MANUFACTURER);
             body.put("serial", serialFromMdnsName(currentMdnsName));
             body.put("mdns_name", currentMdnsName);
             body.put("ssid", currentSsid);
+            body.put("profile", profile.name);
             body.put("ip", currentIp);
             body.put("port", currentPort);
             body.put("connect", endpoint);
@@ -1149,8 +1174,9 @@ public class ReporterService extends Service {
 
         if (code >= 200 && code < 300) {
             lastReportedEndpoint = endpoint;
+            lastReportedProfile = profile.name;
             worker.removeCallbacks(retryReport);
-            status(Prefs.ST_REPORT, time + "  HTTP " + code + "  (" + reason + ")");
+            status(Prefs.ST_REPORT, time + "  HTTP " + code + "  (" + reason + ", " + profile.name + ")");
             return;
         }
 

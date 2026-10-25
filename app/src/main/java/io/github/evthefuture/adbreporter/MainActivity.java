@@ -237,13 +237,18 @@ public class MainActivity extends Activity {
         List<String> ssids = Prefs.ssids(this);
         String ssid = status.getString(Prefs.ST_SSID, "");
         String endpoint = status.getString(Prefs.ST_ENDPOINT, "");
+        Profiles.Profile profile = Profiles.forSsid(this, ssid.isEmpty() ? null : ssid);
         StringBuilder text = new StringBuilder();
 
         text.append("Automatic      : ").append(auto ? "ON" : "off (enable in Settings)").append('\n');
-        text.append("Device ID      : ").append(Prefs.deviceId(this)).append('\n');
+        text.append("Device ID      : ")
+                .append(profile == null ? Prefs.deviceId(this) : profile.effectiveDeviceId(this)).append('\n');
         text.append("Networks       : ").append(ssids.isEmpty() ? "none configured" : join(ssids)).append('\n');
         text.append("Current SSID   : ").append(ssid.isEmpty() ? "-" : ssid)
-                .append(ssids.contains(ssid) ? "  (match)" : "").append('\n');
+                .append(profile != null ? "  (match)" : "").append('\n');
+        text.append("Profile        : ").append(profile == null ? "-" : profile.name).append('\n');
+        text.append("Server         : ")
+                .append(profile == null || profile.url.isEmpty() ? "-" : profile.url).append('\n');
         text.append("Wireless debug : ").append(onOff(Prefs.isWirelessDebuggingEnabled(this))).append('\n');
         text.append("Last report    : ").append(status.getString(Prefs.ST_REPORT, "-")).append('\n');
         text.append("Last event     : ").append(status.getString(Prefs.ST_EVENT, "-")).append("\n\n");
@@ -256,7 +261,7 @@ public class MainActivity extends Activity {
         text.append(check(locationOn)).append("Location switched on\n");
         text.append(check(notifications)).append("Notifications allowed\n");
         text.append(check(!ssids.isEmpty())).append("At least one network\n");
-        text.append(check(!Prefs.settings(this).getString(Prefs.URL, "").isEmpty())).append("Server URL\n");
+        text.append(check(Profiles.anyUrl(this))).append("Server URL in a profile\n");
         text.append(check(auto)).append("Activate and report automatically");
 
         statusView.setText(text);

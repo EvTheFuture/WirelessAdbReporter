@@ -32,6 +32,11 @@ android {
     namespace "io.github.evthefuture.adbreporter"
     compileSdk 36
 
+    // Named, so the build uses the build tools that go with compileSdk 36
+    // instead of the plugin's default, which may not be installed and
+    // which Gradle cannot fetch into a system wide SDK
+    buildToolsVersion "36.0.0"
+
     defaultConfig {
         applicationId "io.github.evthefuture.adbreporter"
         minSdk 30

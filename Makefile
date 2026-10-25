@@ -61,6 +61,8 @@ URL ?=
 TOKEN ?=
 DEVICE_ID ?=
 SSIDS ?=
+PROFILE ?=
+REMOVE_PROFILE ?=
 AUTO ?= true
 
 # Receiver for make serve
@@ -78,7 +80,7 @@ help:
 	@echo "  make direct              the APK without Gradle, straight from the SDK tools (build.sh)"
 	@echo "  make install             install the debug APK on the connected phone"
 	@echo "  make grant               grant secure settings, location and notifications"
-	@echo "  make provision           configure the app, URL= TOKEN= DEVICE_ID= SSIDS=a,b AUTO=true"
+	@echo "  make provision           configure the app, PROFILE= URL= TOKEN= DEVICE_ID= SSIDS=a,b AUTO=true REMOVE_PROFILE="
 	@echo "  make setup               install, grant and provision in one go"
 	@echo "  make serve               run the receiver here, PORT=$(PORT) TOKEN= with adb connect"
 	@echo "  make check               syntax check the receiver and build.sh, validate VERSION"
@@ -151,6 +153,8 @@ grant:
 # value is single quoted there to keep spaces in SSIDs intact
 provision:
 	adb shell "am start -n $(PKG)/.ProvisionActivity \
+	    $(if $(REMOVE_PROFILE),--es remove_profile '$(REMOVE_PROFILE)') \
+	    $(if $(PROFILE),--es profile '$(PROFILE)') \
 	    $(if $(URL),--es url '$(URL)') \
 	    $(if $(TOKEN),--es token '$(TOKEN)') \
 	    $(if $(DEVICE_ID),--es device_id '$(DEVICE_ID)') \
