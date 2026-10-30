@@ -420,8 +420,27 @@ handle_get() {
     describe "$file" pretty
 }
 
-case "$REQUEST_METHOD" in
-    POST) handle_post ;;
-    GET) handle_get ;;
-    *) fail "405 Method Not Allowed" "method not allowed" ;;
-esac
+dispatch() {
+
+    case "$REQUEST_METHOD" in
+        POST) handle_post ;;
+        GET) handle_get ;;
+        *) fail "405 Method Not Allowed" "method not allowed" ;;
+    esac
+}
+
+# The whole answer is built first so it can carry a Content-Length. Without it
+# uhttpd sends HTTP/1.1 answers chunked, and the uhttpd snapshot in Alpine
+# (before upstream commit 7e64e8b) leaves out the closing chunk, so clients
+# report the transfer as cut off. The x keeps trailing newlines of the body,
+# the inner subshell lets fail() exit without skipping it
+response=$( (dispatch); printf x)
+response=${response%x}
+
+separator=$(printf '\r\n\r\nx')
+separator=${separator%x}
+head=${response%%"$separator"*}
+body=${response#*"$separator"}
+length=$(printf '%s' "$body" | wc -c | tr -d ' ')
+
+printf '%s\r\nContent-Length: %s\r\n\r\n%s' "$head" "$length" "$body"
